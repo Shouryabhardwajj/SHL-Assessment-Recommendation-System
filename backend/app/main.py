@@ -49,18 +49,17 @@ INDEX_PATH = Path("data/faiss.index")
 ID_MAP_PATH = Path("data/id_map.json")
 
 MODEL_NAME = "all-MiniLM-L6-v2"
-DEFAULT_K = 50
+DEFAULT_K = 20
 MIN_TOP_K = 5
 MAX_TOP_K = 10
 
 
 # --------------------------------------------------------------------
-# App Initialization
+# App Initialization (lazy resources)
 # --------------------------------------------------------------------
 
 app = FastAPI(title="SHL Assessment Recommendation API")
 
-# lazy-loaded globals
 model: SentenceTransformer | None = None
 index: faiss.Index | None = None
 catalog: list[dict] | None = None
@@ -112,20 +111,27 @@ class RecommendResponse(BaseModel):
 
 
 # --------------------------------------------------------------------
-# Health Route
+# Health & Warmup Routes
 # --------------------------------------------------------------------
+
+
+@app.get("/warmup")
+def warmup() -> dict[str, str]:
+    load_resources()
+    return {"status": "warmed"}
 
 
 @app.get("/health")
 def health() -> dict[str, int | str]:
-    # resources may not be loaded yet; guard catalog
     count = len(catalog) if catalog is not None else 0
-    return {"status": "healthy"}
+    return {"status": "healthy", "items_loaded": count}
 
 
 # --------------------------------------------------------------------
 # Query Expansion & Intent
 # --------------------------------------------------------------------
+
+Intent = Literal["tech", "soft", "both", "general"]
 
 
 def expand_query(query: str) -> str:
@@ -172,37 +178,44 @@ def expand_query(query: str) -> str:
     return f"{q} {' '.join(expansions)}"
 
 
-Intent = Literal["tech", "soft", "both", "general"]
-
-
 def detect_intent(query: str) -> Intent:
     q = query.lower()
 
     tech_keywords: tuple[str, ...] = (
+        # programming languages
         "java", "python", "c++", "c#", "javascript", "typescript", "sql",
         "r", "go", "ruby", "php", "scala", "kotlin",
+        # frameworks / tools
         "spring", "react", "angular", "node", "django", "flask",
         "aws", "azure", "gcp", "docker", "kubernetes",
         "hadoop", "spark", "tableau", "power bi",
+        # roles
         "developer", "engineer", "programmer", "architect",
         "backend", "frontend", "full stack", "fullstack",
         "data scientist", "data engineer", "ml engineer",
+        # technical skills
         "coding", "programming", "software", "debugging",
         "database", "api", "microservices", "cloud",
         "automation", "testing", "devops", "ci cd",
+        # IT / systems
         "linux", "unix", "networking", "security",
         "cyber", "infrastructure",
     )
 
     soft_keywords: tuple[str, ...] = (
+        # communication
         "communication", "communicate", "presentation", "listening",
         "verbal", "written", "email", "documentation",
+        # teamwork / behavior
         "collaboration", "team", "teamwork", "interpersonal",
         "relationship", "stakeholder",
+        # leadership / management
         "leadership", "manager", "management", "supervisor",
         "people management", "coaching", "mentoring",
+        # personality traits
         "personality", "attitude", "behavior", "behaviour",
         "emotional intelligence", "motivation", "work style",
+        # workplace skills
         "time management", "problem solving", "decision making",
         "critical thinking", "adaptability", "flexibility",
         "conflict", "stress", "resilience", "ethics",
@@ -231,10 +244,12 @@ def family_boost(item: dict, query: str) -> float:
 
     boost = 0.0
 
+    # Programming language alignment
     for lang in ("java", "python", "sql", "c++", "c#", "javascript", "react", "angular"):
         if lang in q and lang in name:
             boost += 1.5
 
+    # Role-based families
     if "developer" in q or "engineer" in q:
         if any(k in name for k in ("programming", "development", "coding", "software")):
             boost += 1.2
@@ -314,8 +329,7 @@ def build_response(items: list[dict]) -> list[RecommendedAssessment]:
 
 
 @app.post("/recommend", response_model=RecommendResponse)
-def recommend(req: RecommendRequest):
-    # lazy-load heavy resources
+def recommend(req: RecommendRequest) -> RecommendResponse:
     load_resources()
     assert catalog is not None and id_map is not None
 

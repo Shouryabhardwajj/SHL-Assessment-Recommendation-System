@@ -55,7 +55,7 @@ MAX_TOP_K = 10
 
 
 # --------------------------------------------------------------------
-# App Initialization (lazy resources)
+# App Initialization (lazy resources, warmed at startup)
 # --------------------------------------------------------------------
 
 app = FastAPI(title="SHL Assessment Recommendation API")
@@ -67,11 +67,14 @@ id_map: list[int] | None = None
 
 
 def load_resources() -> None:
-    """Lazy-load model, FAISS index, and catalog/id_map once per worker."""
+    """Load model, FAISS index, and catalog/id_map once per worker (CPU only)."""
     global model, index, catalog, id_map
 
     if model is None:
-        model = SentenceTransformer(MODEL_NAME)
+        model = SentenceTransformer(
+            MODEL_NAME,
+            device="cpu",  # force CPU
+        )
 
     if index is None:
         index = faiss.read_index(str(INDEX_PATH))
@@ -84,6 +87,12 @@ def load_resources() -> None:
         with ID_MAP_PATH.open("r", encoding="utf-8") as f:
             # id_map is a list mapping FAISS index -> catalog index
             id_map = json.load(f)
+
+
+@app.on_event("startup")
+def startup_event() -> None:
+    # Preload resources at startup to avoid first-request timeout
+    load_resources()
 
 
 # --------------------------------------------------------------------
@@ -111,14 +120,8 @@ class RecommendResponse(BaseModel):
 
 
 # --------------------------------------------------------------------
-# Health & Warmup Routes
+# Health Route
 # --------------------------------------------------------------------
-
-
-@app.get("/warmup")
-def warmup() -> dict[str, str]:
-    load_resources()
-    return {"status": "warmed"}
 
 
 @app.get("/health")
@@ -330,7 +333,7 @@ def build_response(items: list[dict]) -> list[RecommendedAssessment]:
 
 @app.post("/recommend", response_model=RecommendResponse)
 def recommend(req: RecommendRequest) -> RecommendResponse:
-    load_resources()
+    # resources already loaded at startup, but keep assertion for safety
     assert catalog is not None and id_map is not None
 
     top_k = max(MIN_TOP_K, min(req.top_k, MAX_TOP_K))

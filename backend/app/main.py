@@ -120,7 +120,7 @@ class RecommendResponse(BaseModel):
 def health() -> dict[str, int | str]:
     # resources may not be loaded yet; guard catalog
     count = len(catalog) if catalog is not None else 0
-    return {"status": "healthy", "items_loaded": count}
+    return {"status": "healthy"}
 
 
 # --------------------------------------------------------------------
@@ -314,7 +314,7 @@ def build_response(items: list[dict]) -> list[RecommendedAssessment]:
 
 
 @app.post("/recommend", response_model=RecommendResponse)
-def recommend(req: RecommendRequest) -> RecommendResponse:
+def recommend(req: RecommendRequest):
     # lazy-load heavy resources
     load_resources()
     assert catalog is not None and id_map is not None

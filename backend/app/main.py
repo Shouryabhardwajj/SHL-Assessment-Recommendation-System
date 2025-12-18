@@ -10,7 +10,7 @@ import numpy as np
 from fastapi import FastAPI
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
-from fastapi.middleware.cors import CORSMiddleware
+
 
 # --------------------------------------------------------------------
 # Constants & Configuration
@@ -58,25 +58,33 @@ MAX_TOP_K = 10
 # App Initialization
 # --------------------------------------------------------------------
 
-app = FastAPI(title="SHL Assessment Recommendation")
+app = FastAPI(title="SHL Assessment Recommendation API")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# lazy-loaded globals
+model: SentenceTransformer | None = None
+index: faiss.Index | None = None
+catalog: list[dict] | None = None
+id_map: list[int] | None = None
 
-with DATA_PATH.open("r", encoding="utf-8") as f:
-    catalog: list[dict] = json.load(f)
 
-with ID_MAP_PATH.open("r", encoding="utf-8") as f:
-    # id_map is a list mapping FAISS index position -> catalog index
-    id_map: list[int] = json.load(f)
+def load_resources() -> None:
+    """Lazy-load model, FAISS index, and catalog/id_map once per worker."""
+    global model, index, catalog, id_map
 
-index: faiss.Index = faiss.read_index(str(INDEX_PATH))
-model = SentenceTransformer(MODEL_NAME)
+    if model is None:
+        model = SentenceTransformer(MODEL_NAME)
+
+    if index is None:
+        index = faiss.read_index(str(INDEX_PATH))
+
+    if catalog is None:
+        with DATA_PATH.open("r", encoding="utf-8") as f:
+            catalog = json.load(f)
+
+    if id_map is None:
+        with ID_MAP_PATH.open("r", encoding="utf-8") as f:
+            # id_map is a list mapping FAISS index -> catalog index
+            id_map = json.load(f)
 
 
 # --------------------------------------------------------------------
@@ -110,7 +118,9 @@ class RecommendResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, int | str]:
-    return {"status": "healthy", "items_loaded": len(catalog)}
+    # resources may not be loaded yet; guard catalog
+    count = len(catalog) if catalog is not None else 0
+    return {"status": "healthy", "items_loaded": count}
 
 
 # --------------------------------------------------------------------
@@ -169,40 +179,30 @@ def detect_intent(query: str) -> Intent:
     q = query.lower()
 
     tech_keywords: tuple[str, ...] = (
-        # programming languages
         "java", "python", "c++", "c#", "javascript", "typescript", "sql",
         "r", "go", "ruby", "php", "scala", "kotlin",
-        # frameworks / tools
         "spring", "react", "angular", "node", "django", "flask",
         "aws", "azure", "gcp", "docker", "kubernetes",
         "hadoop", "spark", "tableau", "power bi",
-        # roles
         "developer", "engineer", "programmer", "architect",
         "backend", "frontend", "full stack", "fullstack",
         "data scientist", "data engineer", "ml engineer",
-        # technical skills
         "coding", "programming", "software", "debugging",
         "database", "api", "microservices", "cloud",
         "automation", "testing", "devops", "ci cd",
-        # IT / systems
         "linux", "unix", "networking", "security",
         "cyber", "infrastructure",
     )
 
     soft_keywords: tuple[str, ...] = (
-        # communication
         "communication", "communicate", "presentation", "listening",
         "verbal", "written", "email", "documentation",
-        # teamwork / behavior
         "collaboration", "team", "teamwork", "interpersonal",
         "relationship", "stakeholder",
-        # leadership / management
         "leadership", "manager", "management", "supervisor",
         "people management", "coaching", "mentoring",
-        # personality traits
         "personality", "attitude", "behavior", "behaviour",
         "emotional intelligence", "motivation", "work style",
-        # workplace skills
         "time management", "problem solving", "decision making",
         "critical thinking", "adaptability", "flexibility",
         "conflict", "stress", "resilience", "ethics",
@@ -225,30 +225,16 @@ def detect_intent(query: str) -> Intent:
 # --------------------------------------------------------------------
 
 
-def keyword_overlap_score(query: str, item: dict) -> int:
-    q_tokens = set(re.findall(r"\w+", query.lower()))
-    text = f"{item.get('name', '')} {item.get('description', '')}".lower()
-    return sum(1 for t in q_tokens if t in text)
-
-
-def is_generic_cognitive(item: dict) -> bool:
-    name = item.get("name", "").lower()
-    patterns = ("verify", "general ability", "g ability", "numerical reasoning")
-    return any(p in name for p in patterns)
-
-
 def family_boost(item: dict, query: str) -> float:
     q = query.lower()
     name = item.get("name", "").lower()
 
     boost = 0.0
 
-    # Programming language alignment
     for lang in ("java", "python", "sql", "c++", "c#", "javascript", "react", "angular"):
         if lang in q and lang in name:
             boost += 1.5
 
-    # Role-based families
     if "developer" in q or "engineer" in q:
         if any(k in name for k in ("programming", "development", "coding", "software")):
             boost += 1.2
@@ -270,6 +256,7 @@ def family_boost(item: dict, query: str) -> float:
 
 
 def search_index(query: str, k: int = DEFAULT_K) -> np.ndarray:
+    assert model is not None and index is not None
     vec = model.encode([query], normalize_embeddings=True)
     _, indices = index.search(vec, k)
     return indices[0]
@@ -294,22 +281,22 @@ def parse_duration(val) -> int | None:
         if m:
             return int(m.group())
     return None
+
+
+def extract_slug(url: str) -> str:
+    if not url:
+        return ""
+    return url.rstrip("/").split("/")[-1]
+
+
 def build_response(items: list[dict]) -> list[RecommendedAssessment]:
     results: list[RecommendedAssessment] = []
 
     for item in items:
-        raw_url = item.get("url", "").strip()
-
-        # Ensure absolute SHL URL
-        if raw_url.startswith("http"):
-            full_url = raw_url
-        else:
-            full_url = f"https://www.shl.com/products/product-catalog/view/{raw_url.strip('/')}/"
-
         results.append(
             RecommendedAssessment(
                 name=item.get("name", "").strip(),
-                url=full_url,
+                url=extract_slug(item.get("url", "")),
                 description=item.get("description", "").strip(),
                 duration=parse_duration(item.get("assessment_length_minutes")),
                 test_type=map_test_types(item.get("test_type", [])),
@@ -320,6 +307,7 @@ def build_response(items: list[dict]) -> list[RecommendedAssessment]:
 
     return results
 
+
 # --------------------------------------------------------------------
 # Recommendation Route
 # --------------------------------------------------------------------
@@ -327,7 +315,10 @@ def build_response(items: list[dict]) -> list[RecommendedAssessment]:
 
 @app.post("/recommend", response_model=RecommendResponse)
 def recommend(req: RecommendRequest) -> RecommendResponse:
-    # clamp top_k
+    # lazy-load heavy resources
+    load_resources()
+    assert catalog is not None and id_map is not None
+
     top_k = max(MIN_TOP_K, min(req.top_k, MAX_TOP_K))
 
     expanded_query = expand_query(req.query)
@@ -339,7 +330,6 @@ def recommend(req: RecommendRequest) -> RecommendResponse:
 
     for rank, idx in enumerate(indices):
         idx_int = int(idx)
-        # id_map is a list; its element is catalog index
         if idx_int < 0 or idx_int >= len(id_map):
             continue
 
@@ -350,10 +340,8 @@ def recommend(req: RecommendRequest) -> RecommendResponse:
         item = catalog[catalog_idx]
         test_types = item.get("test_type", [])
 
-        # base FAISS rank score
         score = 1.0 / (rank + 1)
 
-        # Intent boost
         if intent == "tech" and any(t in test_types for t in ("K", "A", "C", "S")):
             score += 0.6
 
@@ -363,10 +351,8 @@ def recommend(req: RecommendRequest) -> RecommendResponse:
         if intent == "both":
             score += 0.2
 
-        # family-level boost
         score += family_boost(item, req.query)
 
-        # flagship keyword boost
         name = item.get("name", "").lower()
         if intent in FLAGSHIP_KEYWORDS:
             for kw in FLAGSHIP_KEYWORDS[intent]:
@@ -375,7 +361,6 @@ def recommend(req: RecommendRequest) -> RecommendResponse:
 
         scored.append((score, item))
 
-    # Deduplicate while preserving best score per URL
     seen: dict[str, tuple[float, dict]] = {}
     for score, item in scored:
         url = item.get("url", "")
@@ -384,7 +369,6 @@ def recommend(req: RecommendRequest) -> RecommendResponse:
         if url not in seen or score > seen[url][0]:
             seen[url] = (score, item)
 
-    # Sort by score DESC
     final_items = sorted(
         seen.values(),
         key=lambda x: x[0],

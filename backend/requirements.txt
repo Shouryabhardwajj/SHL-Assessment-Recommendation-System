@@ -1,14 +1,15 @@
-fastapi==0.125.0
-uvicorn==0.38.0
+fastapi==0.110.0
+uvicorn==0.29.0
 
-sentence-transformers==2.7.0
-transformers==4.41.2
+sentence-transformers==2.6.1
+transformers==4.38.2
 
-torch==2.5.1        # no +cpu tag
+torch==2.2.1
 faiss-cpu==1.7.4
+
 numpy==1.26.4
 scikit-learn==1.4.2
 
 requests==2.32.3
 beautifulsoup4==4.12.3
-pydantic==2.8.2
+pydantic==2.6.4

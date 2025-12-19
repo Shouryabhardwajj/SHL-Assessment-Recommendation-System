@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, List, Literal
 
@@ -49,7 +50,7 @@ INDEX_PATH = Path("data/faiss.index")
 ID_MAP_PATH = Path("data/id_map.json")
 
 MODEL_NAME = "all-MiniLM-L6-v2"
-DEFAULT_K = 20
+DEFAULT_K = 15  # reduced for speed, catalog is small
 MIN_TOP_K = 5
 MAX_TOP_K = 10
 
@@ -84,10 +85,13 @@ def load_resources() -> None:
     global model, index, catalog, id_map
 
     if model is None:
-        model = SentenceTransformer(
+        m = SentenceTransformer(
             MODEL_NAME,
             device="cpu",  # force CPU
         )
+        # speed up encoding by limiting sequence length
+        m.max_seq_length = 128
+        model = m
 
     if index is None:
         index = faiss.read_index(str(INDEX_PATH))
@@ -282,13 +286,20 @@ def family_boost(item: dict, query: str) -> float:
     return boost
 
 # --------------------------------------------------------------------
-# Core Utilities
+# Core Utilities (with caching)
 # --------------------------------------------------------------------
 
 
-def search_index(query: str, k: int = DEFAULT_K) -> np.ndarray:
-    assert model is not None and index is not None
+@lru_cache(maxsize=256)
+def encode_query(query: str) -> np.ndarray:
+    assert model is not None
     vec = model.encode([query], normalize_embeddings=True)
+    return vec
+
+
+def search_index(query: str, k: int = DEFAULT_K) -> np.ndarray:
+    assert index is not None
+    vec = encode_query(query)
     _, indices = index.search(vec, k)
     return indices[0]
 
@@ -314,15 +325,14 @@ def parse_duration(val) -> int | None:
     return None
 
 
-
 def build_response(items: list[dict]) -> list[RecommendedAssessment]:
-    results = []
+    results: list[RecommendedAssessment] = []
 
     for item in items:
         results.append(
             RecommendedAssessment(
                 name=item.get("name", "").strip(),
-                url=item.get("url", "").strip(),  
+                url=item.get("url", "").strip(),  # full SHL URL
                 description=item.get("description", "").strip(),
                 duration=parse_duration(item.get("assessment_length_minutes")),
                 test_type=map_test_types(item.get("test_type", [])),
@@ -332,7 +342,6 @@ def build_response(items: list[dict]) -> list[RecommendedAssessment]:
         )
 
     return results
-
 
 # --------------------------------------------------------------------
 # Recommendation Route
@@ -347,6 +356,8 @@ def recommend(req: RecommendRequest) -> RecommendResponse:
     top_k = max(MIN_TOP_K, min(req.top_k, MAX_TOP_K))
 
     expanded_query = expand_query(req.query)
+
+    # reduced search size for speed
     indices = search_index(expanded_query, k=DEFAULT_K)
 
     intent = detect_intent(req.query)

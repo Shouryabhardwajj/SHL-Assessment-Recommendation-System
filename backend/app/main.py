@@ -8,9 +8,9 @@ from typing import Iterable, List, Literal
 import faiss
 import numpy as np
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
-
 
 # --------------------------------------------------------------------
 # Constants & Configuration
@@ -53,12 +53,25 @@ DEFAULT_K = 20
 MIN_TOP_K = 5
 MAX_TOP_K = 10
 
-
 # --------------------------------------------------------------------
 # App Initialization (lazy resources, warmed at startup)
 # --------------------------------------------------------------------
 
 app = FastAPI(title="SHL Assessment Recommendation API")
+
+# CORS configuration
+origins = [
+    "http://localhost:5173",
+    "https://shl-assessment-frontend-ruby.vercel.app",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 model: SentenceTransformer | None = None
 index: faiss.Index | None = None
@@ -94,7 +107,6 @@ def startup_event() -> None:
     # Preload resources at startup to avoid first-request timeout
     load_resources()
 
-
 # --------------------------------------------------------------------
 # Schemas
 # --------------------------------------------------------------------
@@ -118,17 +130,20 @@ class RecommendedAssessment(BaseModel):
 class RecommendResponse(BaseModel):
     recommended_assessments: List[RecommendedAssessment]
 
+# --------------------------------------------------------------------
+# Health & Root Routes
+# --------------------------------------------------------------------
 
-# --------------------------------------------------------------------
-# Health Route
-# --------------------------------------------------------------------
+
+@app.get("/")
+def root() -> dict[str, str]:
+    return {"status": "ok", "message": "SHL API running"}
 
 
 @app.get("/health")
 def health() -> dict[str, int | str]:
     count = len(catalog) if catalog is not None else 0
     return {"status": "healthy", "items_loaded": count}
-
 
 # --------------------------------------------------------------------
 # Query Expansion & Intent
@@ -235,7 +250,6 @@ def detect_intent(query: str) -> Intent:
         return "soft"
     return "general"
 
-
 # --------------------------------------------------------------------
 # Scoring Helpers
 # --------------------------------------------------------------------
@@ -266,7 +280,6 @@ def family_boost(item: dict, query: str) -> float:
             boost += 1.2
 
     return boost
-
 
 # --------------------------------------------------------------------
 # Core Utilities
@@ -324,7 +337,6 @@ def build_response(items: list[dict]) -> list[RecommendedAssessment]:
         )
 
     return results
-
 
 # --------------------------------------------------------------------
 # Recommendation Route

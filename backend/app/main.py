@@ -314,20 +314,15 @@ def parse_duration(val) -> int | None:
     return None
 
 
-def extract_slug(url: str) -> str:
-    if not url:
-        return ""
-    return url.rstrip("/").split("/")[-1]
-
 
 def build_response(items: list[dict]) -> list[RecommendedAssessment]:
-    results: list[RecommendedAssessment] = []
+    results = []
 
     for item in items:
         results.append(
             RecommendedAssessment(
                 name=item.get("name", "").strip(),
-                url=extract_slug(item.get("url", "")),
+                url=item.get("url", "").strip(),  
                 description=item.get("description", "").strip(),
                 duration=parse_duration(item.get("assessment_length_minutes")),
                 test_type=map_test_types(item.get("test_type", [])),
@@ -337,6 +332,7 @@ def build_response(items: list[dict]) -> list[RecommendedAssessment]:
         )
 
     return results
+
 
 # --------------------------------------------------------------------
 # Recommendation Route
